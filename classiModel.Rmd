@@ -1,0 +1,181 @@
+---
+title: "Machine Learning with Package caret"
+author: "Md Rezaul Karim Tusar"
+output:
+  rmarkdown::html_document:
+    theme: united
+    highlight: tango
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+## see http://yihui.name/knitr/options
+knitr::opts_chunk$set(fig.path = 'Figures/', fig.align = 'center',
+                      tidy = FALSE)
+options(replace.assign = TRUE, width = 75, keep.blank.line = FALSE, digits = 6)
+```
+
+# Preparations
+First we install and load package caret. 
+```{r}
+#install.packages("caret")
+library(caret)
+```
+
+Next, we load the dataset. For the demonstration we the ICU dataset introduced
+and analysed in the Biometrics lecture.
+```{r, cache = TRUE}
+ICUData <- read.csv(file = "ICUData.csv")
+```
+
+The goal is to predict the death of a patient using the available variables
+except ID and outcome.
+```{r}
+set.seed(20170628)
+sel <- sample(1:500, 400)
+trainData <- ICUData[sel,-c(1,11)]
+testData <- ICUData[-sel,-c(1,11)]
+trainData$died <- factor(ICUData$outcome[sel] == "died", labels = c("survived", "died"))
+testData$died <- factor(ICUData$outcome[-sel] == "died", labels = c("survived", "died"))
+table(trainData$died)
+```
+
+That is, we are in an unbalanced situation. For balancing the data, we use 
+a simple up-sampling.
+```{r}
+set.seed(20170628) # to make it reproducible
+trainData.up <- upSample(x = trainData[, -ncol(trainData)],
+                     y = trainData$died)   
+table(trainData.up$Class) # upSample changes variable name of outcome
+```
+
+# Computation of Classifiers
+We consider the following procedures: logistic regression (LR), linear discriminant analysis (LDA), 
+k-nearest neighbours (kNN), random forest (RF) and support vector machine (SVM).
+
+Before we start training the classifiers we set some control parameters. We use
+10-fold cross-validation replicated 10 times.
+```{r}
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10)
+```
+
+We start with LR combined with a stepwise feature selection.
+```{r, cache=TRUE}
+glmFit <- train(Class ~ ., data = trainData.up, 
+                method = "glmStepAIC", 
+                trControl = fitControl,
+                trace = FALSE)
+glmFit
+```
+
+Next, we use LDA again in combination with stepwise feature selection.
+```{r, warning = FALSE, cache=TRUE}
+ldaFit <- train(Class ~ ., data = trainData.up, 
+                method = "stepLDA", 
+                trControl = fitControl,
+                improvement = 0.01, criterion = "AC", output = FALSE)
+ldaFit
+```
+
+Next, we perform kNN without feature selection but with tuning of the 
+parameter k.
+```{r, cache=TRUE}
+knnFit <- train(Class ~ ., data = trainData.up, 
+                method = "knn", 
+                trControl = fitControl,
+                tuneGrid = data.frame(k = 1:10))
+knnFit
+```
+
+Very good results but probably caused by up-sampling. We repeat the 
+classification with the original dataset.
+```{r, cache=TRUE}
+knnFit2 <- train(died ~ ., data = trainData, 
+                 method = "knn", 
+                 trControl = fitControl,
+                 tuneGrid = data.frame(k = 1:10))
+knnFit2
+```
+
+Now, the accuracy is dominated by the larger class, which consists of $86.2\%$
+of the samples. Hence, in case of unbalanced datasets one has to be very 
+carefull when applying kNN.
+
+We go on with RF where feature selection is embedded in the learning process.
+```{r, cache=TRUE}
+rfFit <- train(Class ~ ., data = trainData.up, 
+               method = "rf", 
+               trControl = fitControl,
+               tuneGrid = data.frame(mtry = 2:9))
+rfFit
+```
+
+The results look too optimistic, which might be caused by the up-sampling. We
+consider the original training set.
+```{r, cache=TRUE}
+rfFit2 <- train(died ~ ., data = trainData, 
+                method = "rf", 
+                trControl = fitControl,
+                tuneGrid = data.frame(mtry = 2:9))
+rfFit2
+```
+
+Next, we use SVM with radial/Gaussian kernel, parameter tuning and 
+feauter selection by recursive feature elimination (wrapper approach).
+In a first step, we have to change the factor variables into dummy variables.
+```{r, cache=TRUE}
+dummies <- dummyVars(Class ~ ., data = trainData.up)
+trainData.up.dummies <- predict(dummies, newdata = trainData.up)
+svmFit <- rfe(trainData.up.dummies, trainData.up$Class,
+              sizes = c(2, 3, 5, 9),
+              rfeControl = rfeControl(functions = caretFuncs,
+                                      method = "repeatedcv",
+                                      number = 10, repeats = 10),
+              ## pass options to train()
+              method = "svmRadial")
+svmFit
+```
+
+As tuning in combination with recursive feature elimination is very time consuming, 
+we considered only a few sizes.
+
+Finally, we compare the performance of all procedures.
+```{r}
+## list of models
+models <- list(LR = glmFit, LDA = ldaFit, kNN = knnFit, kNN2 = knnFit2,
+               RF = rfFit, RF2 = rfFit2, SVM = svmFit)
+## Collect resampling results
+res <- resamples(models)
+## Summary and box plot of resampling results
+summary(res, metric = c("Kappa", "Accuracy"))
+bwplot(res , metric = c("Kappa","Accuracy"))
+```
+
+That is, as we have doubts in the results of kNN and RF, the best performing method
+for our data set is SVM. We verify the results using the hold-out test data. 
+
+```{r}
+confusionMatrix(predict(glmFit, testData), testData$died)
+confusionMatrix(predict(ldaFit, testData), testData$died)
+confusionMatrix(predict(knnFit, testData), testData$died)
+confusionMatrix(predict(knnFit2, testData), testData$died)
+confusionMatrix(predict(rfFit, testData), testData$died)
+confusionMatrix(predict(rfFit2, testData), testData$died)
+dummies <- dummyVars(died ~ ., data = testData)
+testData.dummies <- predict(dummies, newdata = testData)
+confusionMatrix(predict(svmFit, testData.dummies), testData$died)
+```
+
+For the test set LR performs best, which might indicate that some overfitting
+occured in case of SVM.
+
+# Software
+We used the following software versions to generate this report.
+```{r, info, echo = FALSE}
+sessionInfo()
+```
